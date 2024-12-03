@@ -1,0 +1,1141 @@
+;***********************************************************
+;*
+;*	This is the TRANSMIT skeleton file for Lab 7 of ECE 375
+;*
+;*  	Rock Paper Scissors
+;* 	Requirement:
+;* 	1. USART1 communication
+;* 	2. Timer/counter1 Normal mode to create a 1.5-sec delay
+;***********************************************************
+;*
+;*	 Author: Enter your name
+;*	   Date: Enter Date
+;*
+;***********************************************************
+
+.include "m32U4def.inc"         ; Include definition file
+
+;***********************************************************
+;*  Internal Register Definitions and Constants
+;***********************************************************
+.def    mpr = r16               ; Multi-Purpose Register
+.def	userState = r17
+.def	oppState = r18
+.def	gameState = r19
+.def	i = r23
+.def	mpr2 = r24
+
+
+; Use this signal code between two boards for their game ready
+.equ    SendReady = 0b11111111
+
+;***********************************************************
+;*  Start of Code Segment
+;***********************************************************
+.cseg                           ; Beginning of code segment
+
+;***********************************************************
+;*  Interrupt Vectors
+;***********************************************************
+.org    $0000                   ; Beginning of IVs
+	    rjmp    INIT            	; Reset interrupt
+
+.org	$0002
+		rjmp	LEFT_HAND		//call LEFT_HAND
+		reti
+
+.org	$0004
+		rjmp	RIGHT_HAND		//call RIGHT_HAND
+		reti
+
+.org	$0032
+		rjmp	USART_RX		//call USART_RX
+		reti
+
+.org    $0056                   ; End of Interrupt Vectors
+
+;***********************************************************
+;*  Program Initialization
+;***********************************************************
+INIT:
+	; Initialize the Stack Pointer
+		ldi		mpr, low(RAMEND)
+		out		SPL, mpr		; Load SPL with low byte of RAMEND
+		ldi		mpr, high(RAMEND)
+		out		SPH, mpr		; Load SPH with high byte of RAMEND
+
+	;I/O Ports
+		ldi		mpr, $FF		; Set Port B Data Direction Register
+		out		DDRB, mpr		; for output
+		ldi		mpr, $00		; Initialize Port B Data Register
+		out		PORTB, mpr		; so all Port B outputs are low
+
+		; Initialize Port D for input
+		ldi		mpr, $00		; Set Port D Data Direction Register
+		out		DDRD, mpr		; for input
+		ldi		mpr, $FF		; Initialize Port D Data Register
+		out		PORTD, mpr		; so all Port D inputs are Tri-State
+
+	; Initialize external interrupts
+		; Set the Interrupt Sense Control to falling edge
+		ldi		mpr, 0b00001010		//set interrupt sense to falling edge
+		sts		EICRA, mpr			//set interrupt sense to falling edge
+
+		; Configure the External Interrupt Mask
+		ldi		mpr, 0b00000000		//enable interrupts 0 and 1 
+		out		EIMSK, mpr			//enable interrupts 0 and 1 
+
+	; Initialize LCD Display
+		call	LCDInit			//Calls LCD initialization function in LCDDriver file
+
+	; Load strings from program memory
+		rcall	LOAD_STRINGS	//load strings to data memory for lcd
+
+	;USART1
+		;Set double data rate
+		ldi		mpr, (1 << U2X1)
+		sts		UCSR1A, mpr
+
+		;Set baudrate at 2400bps
+		ldi		mpr, high(416)
+		sts		UBRR1H, mpr
+		ldi		mpr, low(416)
+		sts		UBRR1L, mpr
+
+		;Enable receiver and transmitter
+		ldi		mpr, (0<<TXEN1 | 1 << RXEN1)
+		sts		UCSR1B, mpr
+
+		;Set frame format: 8 data bits, 2 stop bits
+		ldi		mpr, (1 << USBS1 | 1 << UCSZ11 | 1 << UCSZ10)
+		sts		UCSR1C, mpr
+
+	;TIMER/COUNTER1
+		;Set Normal mode
+		ldi		mpr, $00
+		out		TCCR0A, mpr
+		ldi		mpr, 0b00000101
+		out		TCCR0B, mpr
+
+	;Other
+		ldi		userState, 0b00010010
+		sei
+
+;***********************************************************
+;*  Main Program
+;***********************************************************
+MAIN:
+
+		rcall	LOAD_WELCOME	
+		rcall	LCDWrite
+
+		ldi		oppState, $00
+
+LOBBY:		
+		in		mpr, PIND		//get button input
+		sbrs	mpr, 7			//skip next line if button 7 is not pressed (1)
+		rcall	TRANSMIT_READY		//play game if button 7 is pressed (0)
+
+		cpi		oppState, $FF
+		breq	PLAY_GAME
+
+		rjmp	LOBBY
+
+;***********************************************************
+;*	Functions and Subroutines
+;***********************************************************
+
+;----------------------------------------------------------------
+; Sub:	USART_RX
+; Desc:	Load receive data buffer to oppState
+;----------------------------------------------------------------
+USART_RX:
+		lds		oppState, UDR1
+		ret
+
+;----------------------------------------------------------------
+; Sub:	USART_TX
+; Desc:	Loads mpr to data buffer to be transmitted
+;----------------------------------------------------------------
+USART_TX:
+		lds		mpr2, UCSR1A
+		sbrs	mpr2, UDRE1
+		rjmp	USART_TX
+		sts		UDR1, mpr
+		ret
+
+;----------------------------------------------------------------
+; Sub:	PLAY_GAME
+; Desc:	Play rock paper scissors with second avr board
+;----------------------------------------------------------------
+PLAY_GAME:
+		ldi		mpr, 0b10100000
+		out		portb, mpr
+		ldi		gameState, $01
+		in		mpr, PIND		//get button input
+		sbrs	mpr, 7			//skip next line if button 7 is not pressed (1)
+		rcall	SELECTION		//play game if button 7 is pressed (0)
+
+TRANSMIT_READY:
+		;Enable receiver and transmitter
+		ldi		mpr, (1<<TXEN1 | 0 << RXEN1)
+		sts		UCSR1B, mpr
+		ldi		mpr, SendReady
+		rcall	USART_TX
+		
+		;Enable receiver and transmitter
+		ldi		mpr, (0<<TXEN1 | 1 << RXEN1)
+		sts		UCSR1B, mpr
+
+		cpi		gameState, $01
+		breq	SELECTION
+
+WAITING_ROOM:
+		rcall	LOAD_WAITING
+		rcall	LCDWrite
+		ldi		gameState, $00
+		cpi		oppState, $FF
+		breq	SELECTION
+		rjmp	WAITING_ROOM
+		
+SELECTION:
+		ldi		mpr, 0b00000011	//enable interrupts 0 and 1 
+		out		EIMSK, mpr		//enable interrupts 0 and 1 
+
+		rcall	DISPLAY_USER
+		rcall	LCDWrite
+
+		ldi		mpr, 0b11110000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b01110000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b00110000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b00010000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b00000000
+		out		portb, mpr
+		
+		ldi		mpr, 0b00000000	//enable interrupts 0 and 1 
+		out		EIMSK, mpr		//enable interrupts 0 and 1 
+
+//FIRST STATE EXCHANGE
+		mov		mpr, userState
+		sbrs	gameState, 0
+		rcall	WAIT
+
+		;Enable receiver and transmitter
+		ldi		mpr, (1<<TXEN1 | 0 << RXEN1)
+		sts		UCSR1B, mpr
+
+		rcall	USART_TX
+		
+		;Enable receiver and transmitter
+		ldi		mpr, (0<<TXEN1 | 1 << RXEN1)
+		sts		UCSR1B, mpr
+
+		rcall	DISPLAY_OPP
+		rcall	LCDWrite
+
+		ldi		mpr, 0b11110000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b01110000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b00110000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b00010000
+		out		portb, mpr
+		rcall	WAIT
+		ldi		mpr, 0b00000000
+		out		portb, mpr
+
+STAGE2:	
+		rjmp	STAGE2
+
+
+
+;----------------------------------------------------------------
+; Sub:	DISPLAY_OPP
+; Desc:	Writes user selection onto screen
+;----------------------------------------------------------------
+DISPLAY_OPP:
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	XL			//save Z low
+		push	XH			//save Z high
+
+		; Move strings from Program Memory to Data Memory
+		ldi		YL, low(Line1)		//Set Y low to low of Line1
+		ldi		YH, high(Line1)		//Set Y high to high of Line1
+
+		mov		mpr, oppState
+		cbr		mpr, $0F
+
+		cpi		mpr, $10
+		breq	OPP_LEFT_ROCK
+
+		cpi		mpr, $20
+		breq	OPP_LEFT_PAPER
+
+		cpi		mpr, $30
+		breq	OPP_LEFT_SCISSORS
+
+OPP_LEFT_ROCK:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Rock)		//Load low byte of Rock beginning to X
+		ldi		XH, high(Rock)		//Load high byte of Rock beginning to X
+
+LOAD_OPP_LROCK:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_OPP_LROCK		//loop if i not equal to zero
+		rjmp	OPP_DIVIDER
+
+//Load user left paper to line 2 of lcd memory
+OPP_LEFT_PAPER:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Paper)		//Load low byte of Paper beginning to X
+		ldi		XH, high(Paper)		//Load high byte of Paper beginning to X
+
+LOAD_OPP_LPAPER:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_OPP_LPAPER		//loop if i not equal to zero
+		rjmp	OPP_DIVIDER
+
+
+OPP_LEFT_SCISSORS:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Scissor)		//Load low byte of Scissor beginning to X
+		ldi		XH, high(Scissor)		//Load high byte of Scissor beginning to X
+
+LOAD_OPP_LSCISSORS:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_OPP_LSCISSORS		//loop if i not equal to zero
+		rjmp	OPP_DIVIDER
+
+
+OPP_DIVIDER:
+		ldi		XL, low(Divider)		//Load low byte of Divider beginning to X
+		ldi		XH, high(Divider)		//Load high byte of Divider beginning to X
+
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+
+
+		mov		mpr, oppState
+		cbr		mpr, $F0
+
+		cpi		mpr, $01
+		breq	OPP_RIGHT_ROCK
+
+		cpi		mpr, $02
+		breq	OPP_RIGHT_PAPER
+
+		cpi		mpr, $03
+		breq	OPP_RIGHT_SCISSORS
+
+OPP_RIGHT_ROCK:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Rock)		//Load low byte of Rock beginning to X
+		ldi		XH, high(Rock)		//Load high byte of Rock beginning to X
+
+LOAD_OPP_RROCK:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_OPP_RROCK		//loop if i not equal to zero
+		rjmp	END_OPP_LOAD
+
+//Load user left paper to line 2 of lcd memory
+OPP_RIGHT_PAPER:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Paper)		//Load low byte of Paper beginning to X
+		ldi		XH, high(Paper)		//Load high byte of Paper beginning to X
+
+LOAD_OPP_RPAPER:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_OPP_RPAPER		//loop if i not equal to zero
+		rjmp	END_OPP_LOAD
+
+
+OPP_RIGHT_SCISSORS:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Scissor)		//Load low byte of Scissor beginning to X
+		ldi		XH, high(Scissor)		//Load high byte of Scissor beginning to X
+
+LOAD_OPP_RSCISSORS:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_OPP_RSCISSORS		//loop if i not equal to zero
+		rjmp	END_OPP_LOAD
+
+END_OPP_LOAD:
+
+		pop		XH			//restore Z high
+		pop		XL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+
+
+;----------------------------------------------------------------
+; Sub:	DISPLAY_USER
+; Desc:	Writes user selection onto screen
+;----------------------------------------------------------------
+DISPLAY_USER:
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	XL			//save Z low
+		push	XH			//save Z high
+
+		; Move strings from Program Memory to Data Memory
+		ldi		i, $8					//Set i to 16 for loop
+		ldi		YL, low(Line1)		//Set Y low to low of Line1
+		ldi		YH, high(Line1)		//Set Y high to high of Line1
+		ldi		XL, low(Game)		//Load low byte of GAME_START beginning to X
+		ldi		XH, high(Game)		//Load high byte of GAME_START beginning to X
+
+FIRST_LINE:	//Load string1 into data memory
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	FIRST_LINE		//loop if i not equal to zero
+
+		ldi		YL, low(Line2)		//Set Y low to low of Line1
+		ldi		YH, high(Line2)		//Set Y high to high of Line1
+
+		mov		mpr, userState
+		cbr		mpr, $0F
+
+		cpi		mpr, $10
+		breq	USER_LEFT_ROCK
+
+		cpi		mpr, $20
+		breq	USER_LEFT_PAPER
+
+		cpi		mpr, $30
+		breq	USER_LEFT_SCISSORS
+
+USER_LEFT_ROCK:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Rock)		//Load low byte of Rock beginning to X
+		ldi		XH, high(Rock)		//Load high byte of Rock beginning to X
+
+LOAD_USER_LROCK:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_LROCK		//loop if i not equal to zero
+		rjmp	USER_DIVIDER
+
+//Load user left paper to line 2 of lcd memory
+USER_LEFT_PAPER:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Paper)		//Load low byte of Paper beginning to X
+		ldi		XH, high(Paper)		//Load high byte of Paper beginning to X
+
+LOAD_USER_LPAPER:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_LPAPER		//loop if i not equal to zero
+		rjmp	USER_DIVIDER
+
+
+USER_LEFT_SCISSORS:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Scissor)		//Load low byte of Scissor beginning to X
+		ldi		XH, high(Scissor)		//Load high byte of Scissor beginning to X
+
+LOAD_USER_LSCISSORS:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_LSCISSORS		//loop if i not equal to zero
+		rjmp	USER_DIVIDER
+
+
+USER_DIVIDER:
+		ldi		XL, low(Divider)		//Load low byte of Divider beginning to X
+		ldi		XH, high(Divider)		//Load high byte of Divider beginning to X
+
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+
+
+		mov		mpr, userState
+		cbr		mpr, $F0
+
+		cpi		mpr, $01
+		breq	USER_RIGHT_ROCK
+
+		cpi		mpr, $02
+		breq	USER_RIGHT_PAPER
+
+		cpi		mpr, $03
+		breq	USER_RIGHT_SCISSORS
+
+USER_RIGHT_ROCK:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Rock)		//Load low byte of Rock beginning to X
+		ldi		XH, high(Rock)		//Load high byte of Rock beginning to X
+
+LOAD_USER_RROCK:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_RROCK		//loop if i not equal to zero
+		rjmp	END_USER_LOAD
+
+//Load user left paper to line 2 of lcd memory
+USER_RIGHT_PAPER:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Paper)		//Load low byte of Paper beginning to X
+		ldi		XH, high(Paper)		//Load high byte of Paper beginning to X
+
+LOAD_USER_RPAPER:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_RPAPER		//loop if i not equal to zero
+		rjmp	END_USER_LOAD
+
+
+USER_RIGHT_SCISSORS:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Scissor)		//Load low byte of Scissor beginning to X
+		ldi		XH, high(Scissor)		//Load high byte of Scissor beginning to X
+
+LOAD_USER_RSCISSORS:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_RSCISSORS		//loop if i not equal to zero
+		rjmp	END_USER_LOAD
+
+END_USER_LOAD:
+
+		pop		XH			//restore Z high
+		pop		XL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+
+;----------------------------------------------------------------
+; Sub:	LEFT_HAND
+; Desc:	Changes left hand option in register and display
+;----------------------------------------------------------------
+LEFT_HAND:		
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	XL			//save Z low
+		push	XH			//save Z high
+
+		rcall	WAIT
+		
+		ldi		mpr, $10
+		add		userState, mpr		
+
+		sbrs	userState, 6
+		rjmp	LEFT_SEL
+		cbr		userState, 0b01110000
+		add		userState, mpr
+
+LEFT_SEL:
+		ldi		YL, low(Line2)		//Set Y low to low of Line1
+		ldi		YH, high(Line2)		//Set Y high to high of Line1
+		
+		mov		mpr, userState
+		cbr		mpr, $0F
+
+		cpi		mpr, $10
+		breq	USER_LEFT_ROCK1
+
+		cpi		mpr, $20
+		breq	USER_LEFT_PAPER1
+
+		cpi		mpr, $30
+		breq	USER_LEFT_SCISSORS1
+
+USER_LEFT_ROCK1:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Rock)		//Load low byte of Rock beginning to X
+		ldi		XH, high(Rock)		//Load high byte of Rock beginning to X
+
+LOAD_USER_LROCK1:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_LROCK1		//loop if i not equal to zero
+		rjmp	END_LEFTHAND
+
+//Load user left paper to line 2 of lcd memory
+USER_LEFT_PAPER1:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Paper)		//Load low byte of Paper beginning to X
+		ldi		XH, high(Paper)		//Load high byte of Paper beginning to X
+
+LOAD_USER_LPAPER1:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_LPAPER1		//loop if i not equal to zero
+		rjmp	END_LEFTHAND
+
+
+USER_LEFT_SCISSORS1:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Scissor)		//Load low byte of Scissor beginning to X
+		ldi		XH, high(Scissor)		//Load high byte of Scissor beginning to X
+
+LOAD_USER_LSCISSORS1:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_LSCISSORS1		//loop if i not equal to zero
+
+END_LEFTHAND:
+		rcall	LCDWrite
+
+		ldi		mpr, 0b00000011	//clear queued interrupts
+		out		EIFR, mpr		//clear queued interrupts
+		
+		pop		XH			//restore Z high
+		pop		XL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+
+;----------------------------------------------------------------
+; Sub:	RIGHT_HAND
+; Desc:	Changes right hand option in register and display
+;----------------------------------------------------------------
+RIGHT_HAND:		
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	XL			//save Z low
+		push	XH			//save Z high
+
+		rcall	WAIT
+		
+		ldi		mpr, $01
+		add		userState, mpr		
+
+		sbrs	userState, 2
+		rjmp	RIGHT_SEL
+		cbr		userState, 0b00000111
+		add		userState, mpr
+
+RIGHT_SEL:
+		ldi		YL, low($0119)		//Set Y low to low of Line1
+		ldi		YH, high($0119)		//Set Y high to high of Line1
+
+		mov		mpr, userState
+		cbr		mpr, $F0
+
+		cpi		mpr, $01
+		breq	USER_RIGHT_ROCK1
+
+		cpi		mpr, $02
+		breq	USER_RIGHT_PAPER1
+
+		cpi		mpr, $03
+		breq	USER_RIGHT_SCISSORS1
+
+USER_RIGHT_ROCK1:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Rock)		//Load low byte of Rock beginning to X
+		ldi		XH, high(Rock)		//Load high byte of Rock beginning to X
+
+LOAD_USER_RROCK1:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_RROCK1		//loop if i not equal to zero
+		rjmp	END_RIGHTHAND
+
+//Load user left paper to line 2 of lcd memory
+USER_RIGHT_PAPER1:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Paper)		//Load low byte of Paper beginning to X
+		ldi		XH, high(Paper)		//Load high byte of Paper beginning to X
+
+LOAD_USER_RPAPER1:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_RPAPER1		//loop if i not equal to zero
+		rjmp	END_RIGHTHAND
+
+
+USER_RIGHT_SCISSORS1:
+		ldi		i, $7					//Set i to 16 for loop
+		ldi		XL, low(Scissor)		//Load low byte of Scissor beginning to X
+		ldi		XH, high(Scissor)		//Load high byte of Scissor beginning to X
+
+LOAD_USER_RSCISSORS1:
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOAD_USER_RSCISSORS1		//loop if i not equal to zero
+
+END_RIGHTHAND:
+		rcall	LCDWrite
+
+		ldi		mpr, 0b00000011	//clear queued interrupts
+		out		EIFR, mpr		//clear queued interrupts
+		
+		pop		XH			//restore Z high
+		pop		XL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+				
+;***********************************************************
+;*	Stored Program Data
+;***********************************************************
+
+;-----------------------------------------------------------
+; An example of storing a string. Note the labels before and
+; after the .DB directive; these can help to access the data
+;-----------------------------------------------------------
+WELCOME_START:
+    .DB		"    Welcome!    "		; Declaring data in ProgMem
+    .DB		"Please press PD7"		; Declaring data in ProgMem
+WELCOME_END:
+
+WAITING_START:
+	.DB		" Ready. Waiting "
+	.DB		"for the opponent"
+WAITING_END:
+
+GAME_START:
+	.DB		"   Game start   "
+GAME_END:
+
+ROCK_START:
+	.DB		"Rock    "
+ROCK_END:
+
+PAPER_START:
+	.DB		"Paper   "
+PAPER_END:
+
+SCISSORS_START:
+	.DB		"Scissor "
+SCISSORS_END:
+
+DIVIDER_START:
+	.DB		" |"
+DIVIDER_END:
+
+WIN_START:
+	.DB		"    You won!    "
+WIN_END:
+
+LOSE_START:
+	.DB		"    You lost    "
+LOSE_END:
+
+DRAW_START:
+	.DB		"    Tie game    "
+DRAW_END:
+
+;----------------------------------------------------------------
+; Sub:	LOAD_WELCOME
+; Desc:	Loads welcome message for LCD display
+;----------------------------------------------------------------
+LOAD_WELCOME:
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	XL			//save Z low
+		push	XH			//save Z high
+
+		; Move strings from Program Memory to Data Memory
+		ldi		i, $8					//Set i to 16 for loop
+		ldi		YL, low(Line1)		//Set Y low to low of Line1
+		ldi		YH, high(Line1)		//Set Y high to high of Line1
+		ldi		XL, low(Welcome)		//Load low byte of WELCOME_START beginning to X
+		ldi		XH, high(Welcome)		//Load high byte of WELCOME_START beginning to X
+
+LOOP_WELCOME:	//Load string1 into data memory
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP_WELCOME	//loop if i not equal to zero
+
+		ldi		i, $8					//Set i to 16 for loop
+		ldi		YL, low(Line2)		//Set Y low to low of Line1
+		ldi		YH, high(Line2)		//Set Y high to high of Line1
+
+LOOP_WELCOME2:	//Load string1 into data memory
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP_WELCOME2	//loop if i not equal to zero
+
+		pop		XH			//restore Z high
+		pop		XL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+;----------------------------------------------------------------
+; Sub:	LOAD_WAITING
+; Desc:	Loads welcome message for LCD display
+;----------------------------------------------------------------
+LOAD_WAITING:
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	XL			//save Z low
+		push	XH			//save Z high
+
+		; Move strings from Program Memory to Data Memory
+		ldi		i, $8					//Set i to 16 for loop
+		ldi		YL, low(Line1)		//Set Y low to low of Line1
+		ldi		YH, high(Line1)		//Set Y high to high of Line1
+		ldi		XL, low(Waiting)		//Load low byte of WELCOME_START beginning to X
+		ldi		XH, high(Waiting)		//Load high byte of WELCOME_START beginning to X
+
+LOOP_WAITING:	//Load string1 into data memory
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP_WAITING	//loop if i not equal to zero
+
+		ldi		i, $8					//Set i to 16 for loop
+		ldi		YL, low(Line2)		//Set Y low to low of Line1
+		ldi		YH, high(Line2)		//Set Y high to high of Line1
+
+LOOP_WAITING2:	//Load string1 into data memory
+		ld		mpr, X+			//Load data memory from Xlow to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Ylow from mpr and increment Y
+		ld		mpr, X+ 		//Load data memory from Xhigh to mpr and increment Z
+		st		Y+, mpr			//Store data memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP_WAITING2	//loop if i not equal to zero
+
+		pop		XH			//restore Z high
+		pop		XL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+
+
+
+;----------------------------------------------------------------
+; Sub:	LOAD_STRINGS
+; Desc:	Loads strings for LCD display
+;----------------------------------------------------------------
+LOAD_STRINGS:
+		push	mpr			//save mpr 
+		in		mpr, SREG	//save state
+		push	mpr			//save state
+		push	i			//save i reg
+		push	YL			//save Y low
+		push	YH			//save Y high
+		push	ZL			//save Z low
+		push	ZH			//save Z high
+
+		; Move strings from Program Memory to Data Memory
+		ldi		i, $16			//Set i to 16 for loop
+		ldi		YL, low(Welcome)		//Set Y low to low of Welcome
+		ldi		YH, high(Welcome)			//Set Y high to high of Welcome
+		ldi		ZL, (low(WELCOME_START) << 1) //Load low byte of WELCOME_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(WELCOME_START) << 1) //Load high byte of WELCOME_START beginning to Z, left shift to account for high/low bit
+
+LOOP:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $16			//Set i to 16 for loop
+		ldi		YL, low(Waiting)			//Set Y low to low of Waiting	
+		ldi		YH, high(Waiting)			//Set Y high to high of Waiting
+		ldi		ZL, (low(WAITING_START) << 1) //Load low byte of WAITING_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(WAITING_START) << 1) //Load high byte of WAITING_START beginning to Z, left shift to account for high/low bit
+
+LOOP2:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP2			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $8			//Set i to 8 for loop
+		ldi		YL, low(Game)			//Set Y low to low of Game	
+		ldi		YH, high(Game)			//Set Y high to high of Game
+		ldi		ZL, (low(GAME_START) << 1) //Load low byte of GAME_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(GAME_START) << 1) //Load high byte of GAME_START beginning to Z, left shift to account for high/low bit
+
+LOOP3:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP3			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $4			//Set i to 8 for loop
+		ldi		YL, low(Rock)			//Set Y low to low of Rock	
+		ldi		YH, high(Rock)			//Set Y high to high of Rock
+		ldi		ZL, (low(ROCK_START) << 1) //Load low byte of ROCK_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(ROCK_START) << 1) //Load high byte of ROCK_START beginning to Z, left shift to account for high/low bit
+
+LOOP4:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP4			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $4			//Set i to 8 for loop
+		ldi		YL, low(Paper)			//Set Y low to low of Paper	
+		ldi		YH, high(Paper)			//Set Y high to high of Paper
+		ldi		ZL, (low(PAPER_START) << 1) //Load low byte of PAPER_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(PAPER_START) << 1) //Load high byte of PAPER_START beginning to Z, left shift to account for high/low bit
+
+LOOP5:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP5			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $4			//Set i to 8 for loop
+		ldi		YL, low(Scissor)			//Set Y low to low of Scissor	
+		ldi		YH, high(Scissor)			//Set Y high to high of Scissor
+		ldi		ZL, (low(SCISSORS_START) << 1) //Load low byte of SCISSORS_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(SCISSORS_START) << 1) //Load high byte of SCISSORS_START beginning to Z, left shift to account for high/low bit
+
+LOOP6:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP6			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $1			//Set i to 8 for loop
+		ldi		YL, low(Divider)			//Set Y low to low of Divider	
+		ldi		YH, high(Divider)			//Set Y high to high of Divider
+		ldi		ZL, (low(DIVIDER_START) << 1) //Load low byte of DIVIDER_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(DIVIDER_START) << 1) //Load high byte of DIVIDER_START beginning to Z, left shift to account for high/low bit
+
+LOOP7:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP7			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $8			//Set i to 8 for loop
+		ldi		YL, low(Win)			//Set Y low to low of Win	
+		ldi		YH, high(Win)			//Set Y high to high of Win
+		ldi		ZL, (low(WIN_START) << 1) //Load low byte of WIN_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(WIN_START) << 1) //Load high byte of WIN_START beginning to Z, left shift to account for high/low bit
+
+LOOP8:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP8			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $8			//Set i to 8 for loop
+		ldi		YL, low(Lose)			//Set Y low to low of Lose	
+		ldi		YH, high(Lose)			//Set Y high to high of Lose
+		ldi		ZL, (low(LOSE_START) << 1) //Load low byte of LOSE_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(LOSE_START) << 1) //Load high byte of LOSE_START beginning to Z, left shift to account for high/low bit
+
+LOOP9:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP9			//loop if i not equal to zero
+
+	; Move strings from Program Memory to Data Memory
+		ldi		i, $8			//Set i to 8 for loop
+		ldi		YL, low(Draw)			//Set Y low to low of Lose	
+		ldi		YH, high(Draw)			//Set Y high to high of Lose
+		ldi		ZL, (low(DRAW_START) << 1) //Load low byte of DRAW_START beginning to Z, left shift to account for high/low bit
+		ldi		ZH, (high(DRAW_START) << 1) //Load high byte of DRAW_START beginning to Z, left shift to account for high/low bit
+
+LOOP10:	//Load string1 into data memory
+		lpm		mpr, Z+			//Load program memory from Zlow to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Ylow from mpr and increment Y
+		lpm		mpr, Z+ 		//Load program memory from Zhigh to mpr and increment Z
+		ST		Y+, mpr			//Store program memory into Yhigh from mpr and increment Y
+		dec		i				//Decrement for loop
+		brne	LOOP10			//loop if i not equal to zero
+
+		pop		ZH			//restore Z high
+		pop		ZL			//restore Z low
+		pop		YH			//restore Y high
+		pop		YL			//restore Y low
+		pop		i			//restore i
+		pop		mpr			//restore state
+		out		SREG, mpr	//restore state
+		pop		mpr			//restore mpr
+
+		ret					//return
+
+;----------------------------------------------------------------
+; Sub:	WAIT
+; Desc:	Waits for 1.5 seconds
+;----------------------------------------------------------------
+WAIT:
+	ldi		mpr2, 100
+WAIT_LOOP:
+	ldi		mpr, 178
+	out		TCNT0, mpr
+WAIT_INNER_LOOP:
+	in		i, TIFR0
+	andi	i, 0b00000001
+	breq	WAIT_INNER_LOOP
+	ldi		i, 0b00000001
+	out		TIFR0, i
+	dec		mpr2
+	brne	WAIT_LOOP
+
+	ret
+
+;***********************************************************
+;*	Data Memory Allocation
+;***********************************************************
+.dseg
+.org	$0100				//data memory allocation for lcd display
+Line1:	
+	.byte 16
+Line2:	
+	.byte 16
+Welcome: 
+	.byte 32
+Waiting: 
+	.byte 32
+Game:	
+	.byte 16
+Rock:
+	.byte 8
+Paper:
+	.byte 8
+Scissor:
+	.byte 8
+Divider:
+	.byte 8
+Win:	
+	.byte 16
+Lose:	
+	.byte 16
+Draw:	
+	.byte 16
+	
+;***********************************************************
+;*	Additional Program Includes
+;***********************************************************
+.include "LCDDriver.asm"		; Include the LCD Driver
+
