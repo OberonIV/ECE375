@@ -150,6 +150,9 @@ LOBBY:
 ; Desc:	Load receive data buffer to oppState
 ;----------------------------------------------------------------
 USART_RX:
+		lds 		mpr2, USCR1A
+		sbrs		mpr2, RXC1
+		rjmp		USART_RX
 		lds		oppState, UDR1
 		ret
 
